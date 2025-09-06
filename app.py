@@ -8,7 +8,7 @@ st.set_page_config(page_title="Puntos Bip! – Mapa simple", layout="wide")
 API_URL = "https://datos.gob.cl/api/3/action/datastore_search"
 RESOURCE_ID = "cbd329c6-9fe6-4dc1-91e3-a99689fd0254"  # Recurso Puntos bip! (CKAN DataStore)
 
-# -------- utilidades --------
+# ===================== utilidades =====================
 def _guess_col(columns, *keywords):
     for c in columns:
         name = str(c).lower().strip()
@@ -45,9 +45,12 @@ def fetch_all(resource_id, chunk=1000, q=None):
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
-# -------- carga ----------
+# ===================== UI =====================
 st.title("Puntos de carga de tarjeta Bip! – Mapa con dirección")
 st.caption("Fuente: datos.gob.cl · Recurso con DataStore (API CKAN)")
+
+# “botón de pánico” para móviles antiguos
+compat = st.sidebar.toggle("Modo compatibilidad (si el mapa se ve en negro)", value=False)
 
 df = fetch_all(RESOURCE_ID)
 if df.empty:
@@ -62,14 +65,10 @@ nombre_col = (_guess_col(cols, "nombre") or _guess_col(cols, "local")
               or _guess_col(cols, "establecimiento") or _guess_col(cols, "estaci"))
 direccion_col = _guess_col(cols, "dire")
 lat_col = (_guess_col(cols, "lat") or _first_matching(cols, ["Latitud", "latitud", "LATITUD"]))
-lon_col = (
-    _guess_col(cols, "lon")
-    or _guess_col(cols, "lng")
-    or _guess_col(cols, "long")
-    or _first_matching(cols, ["Longitud", "longitud", "LONGITUD"])
-)
+lon_col = (_guess_col(cols, "lon") or _guess_col(cols, "lng") or _guess_col(cols, "long")
+           or _first_matching(cols, ["Longitud", "longitud", "LONGITUD"]))
 
-# Filtrar RM si existe
+# -------- filtrar RM si existe ----------
 df_rm = df.copy()
 if region_col and region_col in df_rm.columns:
     mask_rm = df_rm[region_col].astype(str).str.contains("metropolitana", case=False, na=False)
@@ -102,9 +101,10 @@ if texto_busqueda:
             m = m | mm
         df_view = df_view[m]
 
-st.success(f"Registros encontrados: {len(df_view):,}")
+# Mensaje simple (sin markdown enriquecido para evitar autolink en iOS)
+st.caption(f"Registros encontrados: {len(df_view)}")
 
-# -------- preparar columnas para pydeck ----------
+# -------- preparar columnas para mapa ----------
 if not (lat_col and lon_col) or (lat_col not in df_view.columns or lon_col not in df_view.columns):
     st.info("No se detectaron columnas de latitud/longitud.")
     st.stop()
@@ -118,7 +118,7 @@ if df_map.empty:
     st.info("No hay coordenadas válidas con los filtros actuales.")
     st.stop()
 
-# Renombrar para pydeck
+# Renombrar para capas
 df_map = df_map.rename(columns={lat_col: "lat", lon_col: "lon"})
 df_map["__tooltip"] = (
     (df_map[nombre_col].astype(str) if nombre_col else "Punto Bip")
@@ -127,51 +127,67 @@ df_map["__tooltip"] = (
     + ((" — " + df_map[comuna_col].astype(str)) if comuna_col else "")
 )
 
-# -------- mapa pydeck con OSM ----------
-initial_view = pdk.ViewState(
-    latitude=float(df_map["lat"].mean()),
-    longitude=float(df_map["lon"].mean()),
-    zoom=11,
-)
+# ===================== mapa =====================
+if not compat:
+    # PyDeck con ajustes para móviles
+    initial_view = pdk.ViewState(
+        latitude=float(df_map["lat"].mean()),
+        longitude=float(df_map["lon"].mean()),
+        zoom=11,
+    )
 
-tile_layer = pdk.Layer(
-    "TileLayer",
-    data="https://c.tile.openstreetmap.org/{z}/{x}/{y}.png",
-    minZoom=0,
-    maxZoom=19,
-    tileSize=256,
-)
+    tile_layer = pdk.Layer(
+        "TileLayer",
+        data="https://c.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        minZoom=0,
+        maxZoom=19,
+        tileSize=256,
+    )
 
-points_layer = pdk.Layer(
-    "ScatterplotLayer",
-    data=df_map,
-    get_position='[lon, lat]',
-    get_radius=60,
-    pickable=True,
-)
+    points_layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=df_map,
+        get_position='[lon, lat]',
+        get_radius=60,
+        pickable=True,
+        get_fill_color=[33, 150, 243, 180],  # color fijo para evitar estilos dinámicos
+    )
 
-deck = pdk.Deck(
-    layers=[tile_layer, points_layer],
-    initial_view_state=initial_view,
-    map_style=None,
-    tooltip={"text": "{__tooltip}"}
-)
+    deck = pdk.Deck(
+        layers=[tile_layer, points_layer],
+        initial_view_state=initial_view,
+        map_style=None,
+        tooltip={"text": "{__tooltip}"},
+        height=560,  # altura fija ayuda en iOS
+        parameters={
+            "depthTest": False,         # reduce glitches en móviles
+            "antialias": True,
+        },
+    )
 
-st.pydeck_chart(deck)
+    st.pydeck_chart(deck, use_container_width=True)
+else:
+    # Render simple para teléfonos “mañosos”
+    df_simple = df_map.rename(columns={"lat": "latitude", "lon": "longitude"})
+    st.map(df_simple[["latitude", "longitude"]], use_container_width=True, zoom=11)
 
-# -------- listado opcional --------
+# ===================== listado =====================
 with st.expander("Ver listado (nombre + dirección)", expanded=False):
     if nombre_col and direccion_col:
-        for _, row in df_map[[nombre_col, direccion_col, comuna_col]].head(150).iterrows():
-            st.write(f"📍 **{row[nombre_col]}** – {row[direccion_col]} ({row[comuna_col]})")
+        list_df = df_map[[nombre_col, direccion_col, comuna_col]].head(150).rename(
+            columns={nombre_col: "Nombre", direccion_col: "Dirección", comuna_col: "Comuna"}
+        )
+        st.dataframe(list_df, use_container_width=True, hide_index=True)
 
-# -------- descarga --------
+# ===================== descarga =====================
 st.download_button(
     "Descargar CSV filtrado",
     data=df_view.to_csv(index=False).encode("utf-8"),
     file_name="puntos_bip_filtrado.csv",
     mime="text/csv",
 )
+
+
 
 
 
